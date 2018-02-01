@@ -1,0 +1,228 @@
+---
+title: "SPR Corpora"
+author: "Yan, Mollica & Tanenhaus"
+date: "January 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(forcats)
+library(lme4)
+library(gdata)
+library(plyr)
+library(stringr)
+
+# Load in subtlex
+subtl = read.table('SUBTLEX.txt', header=T)
+subtl2 = subtl
+subtl = select(subtl, Word, FREQcount, CDcount) %>% dplyr::rename(Text = Word)
+subtl2 = select(subtl2, word=Word, FREQcount, CDcount)
+```
+
+## New Yorker Excerpts (Mollica & Piantadosi, 2017)
+
+```{r, load mp2017, echo=F, message=F, warning=F}
+setwd('SpeedRead')
+
+# Load in reading time data
+data = NULL
+for (f in list.files('Data', full.names=T)) {
+  if (length(grep('RT', f))) {
+    dat = read.csv(f)
+    dat$Story = trim(dat$Story)
+    dat$Mask = trim(dat$Mask)
+    dat$Text = trim(dat$Text)
+    
+    datKey = data.frame(Story=unique(dat$Story)[c(1,5,6,7)], Order=1:4)
+    dat = left_join(dat, datKey)
+    data = rbind(data, dat)
+  }
+}
+
+rm(datKey)
+rm(dat)
+
+# Load in the Language Model
+model = read.csv('LM/LangModelOut.csv', header=F)
+colnames(model) = c('Story','Position','Text','Bigram', 'Unigram')
+model$Text = as.character(trim(model$Text))
+model$Length = nchar(model$Text)
+model$Story = as.factor(mapvalues(model$Story, from=c(0,1,2,3), 
+                                  to=c('up', 'sharper', 'island', 'grammar')))
+model$Bigram = model$Bigram/log(2)
+
+adjust_pos = function(df) {
+  df$Position = seq(0,length(df$Position)-1)
+  return(df[-nrow(df),])
+}
+
+model = ddply(model, .(Story), adjust_pos) %>% select(-Text)
+
+data$Text = as.character(data$Text)
+
+d = data %>% 
+  filter(Story %in% c('island','grammar','up','sharper'), SubjNo > 11 | SubjNo < 2) %>%
+  left_join(model) %>%
+  filter(PerPress == 1) %>%
+  group_by(SubjNo) %>%
+  mutate(LQ=quantile(RT, 0.025), HQ=quantile(RT, 0.975)) %>%
+  ungroup() %>%
+  filter(RT <= HQ & RT >= LQ) %>%
+  select(-HQ, -LQ)
+
+d = d %>% left_join(subtl) %>% filter(!is.na(FREQcount) & !is.na(CDcount))
+d$Story = as.integer(as.factor(d$Story))
+d$Mask = as.integer(as.factor(d$Mask))
+d$FREQcount=log10(d$FREQcount)
+d$Bigram=-1*d$Bigram
+d$CDcount=log10(d$CDcount)
+
+```
+
+### WF vs CD analyses
+
+```{r, wf_cd}
+
+ambos = lmer(RT ~ scale(FREQcount) + scale(CDcount) + 
+                  scale(Length) + scale(Bigram) + scale(Position) + Mask +
+                  (1|SubjNo) + (1|Story), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(ambos)
+
+cd = lmer(RT ~ scale(CDcount) + 
+                  scale(Length) + scale(Bigram) + scale(Position) + Mask +
+                  (1|SubjNo) + (1|Story), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(cd)
+
+wf = lmer(RT ~ scale(FREQcount) + 
+                  scale(Length) + scale(Bigram) + scale(Position) + Mask +
+                  (1|SubjNo) + (1|Story), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(wf)
+
+anova(wf, ambos)
+anova(cd, ambos)
+```
+
+### CD by Position
+
+```{r, cdPOS1}
+
+time_cd = lmer(RT ~ scale(CDcount) + scale(Length) + scale(Bigram) + scale(Position) +
+                  scale(CDcount):scale(Position) +
+                  (1|SubjNo) + (1|Story), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(time_cd)
+
+boots_mp = bootMer(time_cd, fixef, nsim=100, verbose=T)
+
+timeModelBoots = as.data.frame(boots_mp$t) %>% 
+  mutate(Corpus='Mollica2017')
+
+```
+
+## Natural Stories Corpus (Futrell et al., 2017)
+
+```{r, load_ns, echo=F, warning=F, message=F}
+setwd('naturalstories')
+
+#read in RT data from 2 separate files
+b1 <- read.csv('naturalstories_RTS/batch1_pro.csv')
+b2 <- read.csv('naturalstories_RTS/batch2_pro.csv')
+d <- rbind(b1, b2)
+
+##subtract 2 from zone to properly align region...should confirm with Hal that this is correct,
+## but the RTs seem to line up correctly in plots
+d$zone <- d$zone - 2
+
+#read in story words and region
+#item is story (1-10), zone is RT region
+word.df <- read.csv('naturalstories_RTS/all_stories.tok', sep = '\t')
+d <- merge(d, word.df, by= c('item', 'zone'), all.x = T, all.y = T)
+
+#remove regions that do not have words
+d <- filter(d, !is.na(word))
+
+#exclude stories where subject does not get more than 4/6 correct
+unfiltered <- d
+d <- filter(d, correct > 4)
+
+#exclude data points less than 50 ms, greater than 3000 ms
+d <- d[d$RT > 100 & d$RT < 3000, ]
+d$l <- nchar(as.character(d$word))
+
+# read in bigrams
+lm = read.table('freqs/bigrams.txt', header=F, sep="\t", quote="")
+colnames(lm) = c('IZ','GramOrder','word','Ngram','Nm1gram')
+lm$item = word(as.character(lm$IZ), sep="[.]")
+lm$zone = word(as.character(lm$IZ), 2, sep="[.]")
+lm$bigram = with(lm, -log10(Ngram + 0.1) + log10(Nm1gram + 100000))
+
+d = merge(d, lm, by=c('item', 'zone')) %>% 
+  select(-word.x, -IZ, -GramOrder, -Ngram, -Nm1gram, word=word.y)
+
+d = merge(d, subtl2, by='word')
+
+```
+
+### WF vs CD analyses
+
+```{r, ns_cdvwf}
+ambos = lmer(RT ~ scale(log10(FREQcount)) + scale(log10(CDcount)) + 
+                  scale(l) + scale(bigram) + scale(zone) +
+                  (1|WorkerId) + (1|item), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(ambos)
+
+cd = lmer(RT ~ scale(log10(CDcount)) + 
+                  scale(l) + scale(bigram) + scale(zone) +
+                  (1|WorkerId) + (1|item), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(cd)
+
+wf = lmer(RT ~ scale(log10(FREQcount)) + 
+                  scale(l) + scale(bigram) + scale(zone) +
+                  (1|WorkerId) + (1|item), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(wf)
+
+anova(wf, ambos)
+anova(cd, ambos)
+```
+
+### CD by Position
+
+```{r, ns_cdBpos}
+time_cd = lmer(RT ~ scale(log10(CDcount)) + scale(l) + scale(bigram) + scale(zone) +
+                  scale(log10(CDcount)):scale(zone) +
+                  (1|WorkerId) + (1|item), data=d %>% filter(FREQcount > 0, CDcount > 0))
+summary(time_cd)
+
+booty2 = bootMer(time_cd, fixef, nsim=100, verbose=T)
+
+timeModelBoots = unname(as.data.frame(booty$t)) %>% 
+  mutate(Corpus='Mollica2017')
+colnames(timeModelBoots) = c('Intercept','CD','Length','Bigram','Position','CD_POS', 'Corpus')
+
+times = unname(as.data.frame(booty2$t)) %>%
+  mutate(Corpus='Natural Stories')
+colnames(times) = c('Intercept','CD','Length','Bigram','Position','CD_POS', 'Corpus')
+
+BOOOTSY = bind_rows(timeModelBoots, times)
+
+BOOOTSY %>% 
+  select(Corpus, CD, Length, Bigram, Position, CD_POS) %>%
+  gather(Coefficient, Beta, CD:CD_POS) %>%
+  mutate(Coefficient=fct_relevel(Coefficient, 'CD', 'CD_POS', 'Bigram', 'Length', 'Position'),
+         Coefficient=fct_recode(Coefficient, 'CD by Position'='CD_POS'),
+         Corpus=fct_recode(Corpus, 'Natural Stories\nCorpus'='Natural Stories', 'New Yorker\nExcerpts'='Mollica2017')) %>%
+ggplot(aes(Corpus, Beta)) +
+  facet_grid(~Coefficient, scales='free_x') +
+  geom_hline(aes(yintercept=0), linetype=3) +
+  geom_hline(aes(yintercept=1), color='white',alpha=0.01) +
+  geom_hline(aes(yintercept=-1), color='white',alpha=0.01) +
+  stat_summary(fun.ymin = function(x){quantile(x, probs=0.025)},
+               fun.ymax = function(x){quantile(x, probs=0.975)}, geom='linerange') +
+  stat_summary(fun.y=mean, geom='point') +
+  theme_bw() + coord_flip() +
+  ylab('Regression Coefficients for Scaled Predictors') +
+  theme(legend.title = element_blank(),
+        axis.title.y = element_blank())
+
+```

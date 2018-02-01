@@ -1,0 +1,108 @@
+---
+title: "Cogsci Expt 1"
+author: "Yan, Mollica & Tanenhaus"
+date: "January 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(forcats)
+library(lme4)
+```
+
+```{r load data, echo=F, warning=F, message=F}
+
+setwd('Data/')
+
+raw = read.csv('data.csv', header = F, strip.white = T)
+colnames(raw) = c('ID','Order','UTC','W1','W2','Cat1','Freq1','Cat2','Freq2','Condition','PresOrder','Choice','RT','List')
+
+data = raw %>%
+  select(-UTC,-Order, -RT) %>%
+  distinct() %>% # Remove any accidental duplicate rows
+
+  group_by(ID) %>%
+  mutate(N=n()) %>%
+  ungroup() %>%
+  filter(N>=190) %>%  # Remove the incompletes
+
+  unite(Item,W1,W2,remove = F) %>%
+  group_by(ID, Item) %>%
+  mutate(M=n()) %>%
+  ungroup() %>%
+  filter(M==1) %>% # Remove duplicate items
+  
+  mutate(Acc=ifelse(as.character(W2) == as.character(Choice) & Freq1 < Freq2, 1, 0)) %>%
+  group_by(ID) %>%
+  mutate(MACC=mean(Acc)) %>%
+  ungroup() %>%
+  filter(MACC > 0.57) %>% # Remove accuracy at chance
+  select(-N, -M, -MACC)
+
+subtl = read.table('../SUBTLEX.txt', header = T) %>%
+  filter(as.character(Word) %in% unique(c(as.character(data$W1),as.character(data$W2)))) %>%
+  select(W1='Word', LgWF1='Lg10WF', LgCD1='Lg10CD')
+
+data = data %>% left_join(subtl)
+
+colnames(subtl) = c('W2','LgWF2', 'LgCD2')
+
+data = data %>% left_join(subtl)
+
+data = data %>% filter(Freq1 != Freq2) %>%
+  mutate(Cat1=fct_recode(Cat1, "Animals"="Animal"), Cat2=fct_recode(Cat2, "Animals"="Animal")) %>%
+  unite("Cats", Cat1, Cat2) %>%
+  mutate(Cats=fct_recode(Cats, "Animals_Food"="Food_Animals",
+                               "Animals_Fashion"="Fashion_Animals",
+                               "Fashion_Food"="Food_Fashion",
+                               "Animals"="Animals_Animals",
+                               "Food"="Food_Food",
+                               "Fashion"="Fashion_Fashion"))
+
+data$diffij = abs(data$Freq1-data$Freq2)
+data$maxij = ifelse(data$Freq1>data$Freq2, data$Freq1, data$Freq2)
+center <- function(x) { x-mean(x)}
+```
+
+# Are frequency judgments more accurate for comparisons in the same context or across contexts?
+
+```{r, show}
+
+data %>% group_by(ID, Condition) %>% mutate(Scc=mean(Acc)) %>%
+  ungroup() %>% group_by(ID) %>% 
+  mutate(Win=ifelse((Scc == min(Scc) & Condition=='Different')|
+                    (Scc == max(Scc) & Condition=='Same'), 1, 0)) %>%
+  ungroup() %>%
+  ggplot( aes(Condition, Acc, fill=Condition)) +
+  stat_summary(fun.y=mean, aes(group=ID, color=as.factor(Win)), geom='line', alpha=0.1) +
+  stat_summary(fun.y=mean, geom='point') +
+  stat_summary(fun.data=mean_cl_boot, geom='errorbar', width=0.3) +
+  guides(fill=F, color=F) +
+  ylab('Accuracy') + xlab('Context') +
+  theme_bw() + coord_cartesian(ylim=c(0.5, 1))
+
+fit = glmer(Acc ~ Condition + center(diffij) * center(maxij) + PresOrder + 
+             (1|ID) + (1|List), family='binomial', data)
+summary(fit)
+
+symd = data %>%
+  mutate(Freq1=data$Freq2,
+         Freq2=data$Freq1) %>%
+  bind_rows(data, .)
+
+ggplot(symd, aes(x=Freq2, y=Acc, color=Condition, shape=Condition)) + 
+  geom_vline(aes(xintercept=Freq1), color="red") +
+  stat_smooth(method="loess", se=F, size=1, aes(linetype=Condition)) + 
+  stat_summary(fun.y=mean, geom='point') + 
+  facet_wrap(~Freq1, ncol=5) + 
+  xlab("Bin") + 
+  ylab("Accuracy") +
+  theme_bw() +
+  scale_x_continuous(breaks=0:9) +
+  scale_color_manual(values=c('forestgreen','red')) +
+  coord_cartesian(ylim=c(0.45, 1)) +
+  theme(legend.title = element_blank())
+
+```
